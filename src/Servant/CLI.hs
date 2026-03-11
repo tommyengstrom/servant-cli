@@ -41,6 +41,12 @@ module Servant.CLI
     parseClientPretty,
     parseClientPrettyWithContext,
 
+    -- * Flat (curl-style) parser
+    parseClientFlat,
+    parseClientFlatWithContext,
+    parseClientPrettyFlat,
+    parseClientPrettyFlatWithContext,
+
     -- * Typeclasses
     HasCLI (CLIResult, CLIHandler, cliHandler),
 
@@ -53,6 +59,7 @@ module Servant.CLI
     cliPStruct,
     cliPStructWithContext,
     structParser,
+    flatStructParser,
 
     -- ** With context
     cliHandlePStruct,
@@ -80,6 +87,7 @@ import Data.Void
 import Options.Applicative
 import Servant.API (NoContent)
 import Servant.CLI.HasCLI
+import Servant.CLI.Internal.FlatParser (flatStructParser)
 import Servant.CLI.Internal.PStruct
 import Servant.CLI.ParseBody
 import Servant.Client.Core
@@ -283,3 +291,59 @@ parseHandleClient ::
   CLIHandler m api r ->
   IO (m r)
 parseHandleClient pa pm = parseHandleClientWithContext pa pm RNil
+
+-- | Like 'parseClient', but uses the flat curl-style parser.
+-- Routes are specified as URL paths instead of nested subcommands.
+parseClientFlat ::
+  (HasCLI m api '[]) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m (CLIResult m api))
+parseClientFlat pa pm = parseClientFlatWithContext pa pm RNil
+
+-- | Like 'parseClientFlat', but with context.
+parseClientFlatWithContext ::
+  (HasCLI m api context) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Extra context
+  Rec (ContextFor m) context ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m (CLIResult m api))
+parseClientFlatWithContext pa pm p im =
+  flatStructParser (cliPStructWithContext pm pa p) im
+
+-- | Like 'parseClientFlat', but pretty-prints the JSON response.
+parseClientPrettyFlat ::
+  (HasCLI m api '[], CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m BSL.ByteString)
+parseClientPrettyFlat pa pm im =
+  fmap cliPrettyPrint <$> parseClientFlat pa pm im
+
+-- | Like 'parseClientPrettyFlat', but with context.
+parseClientPrettyFlatWithContext ::
+  (HasCLI m api context, CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Extra context
+  Rec (ContextFor m) context ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m BSL.ByteString)
+parseClientPrettyFlatWithContext pa pm p im =
+  fmap cliPrettyPrint <$> parseClientFlatWithContext pa pm p im

@@ -26,6 +26,7 @@
 -- parser.
 module Servant.CLI.Internal.PStruct
   ( OptRead (..),
+    OptKind (..),
     Opt (..),
     Arg (..),
     MultiArg (..),
@@ -36,6 +37,10 @@ module Servant.CLI.Internal.PStruct
     PStructF (..),
     structParser,
     structParser_,
+
+    -- * Endpoint parsing helpers
+    mkOpt,
+    endpointToParser,
 
     -- * Creating
     branch,
@@ -85,13 +90,18 @@ data OptRead :: Type -> Type where
   ORSwitch :: OptRead Bool
   ORMany :: ReadM a -> OptRead [a]
 
+-- | What kind of option this is (for display in help).
+data OptKind = OptQuery | OptHeader | OptOther
+  deriving (Eq, Show)
+
 -- | Query parameters are interpreted as options
 data Opt a = Opt
   { optName :: String,
     optDesc :: String,
     optMeta :: String,
     optVals :: Maybe (NonEmpty String),
-    optRead :: Coyoneda OptRead a
+    optRead :: Coyoneda OptRead a,
+    optKind :: OptKind
   }
   deriving (Functor)
 
@@ -224,19 +234,6 @@ structParser_ = cata go
       argument argRead $
         help argDesc
           <> metavar argMeta
-    mkOpt :: Opt x -> Parser x
-    mkOpt Opt {..} = forI optRead $ \case
-      ORRequired r -> option r mods
-      OROptional r -> optional $ option r mods
-      ORSwitch -> switch $ long optName <> help optDesc
-      ORMany r -> many $ option r mods
-      where
-        mods :: Mod OptionFields y
-        mods =
-          long optName
-            <> help optDesc
-            <> metavar optMeta
-            <> foldMap (completeWith . toList) optVals
     methodPicker :: EndpointMap x -> Parser x
     methodPicker (EPM eps rw) = case M.minView epMap of
       Nothing -> maybe empty mkRaw rw
@@ -249,16 +246,11 @@ structParser_ = cata go
                 <> metavar "METHOD"
                 <> commandGroup "HTTP Methods:"
       where
-        epMap = mkEndpoint <$> eps
-    mkEndpoint :: Endpoint x -> Parser x
-    mkEndpoint =
-      unsafeApply (Proxy @Parser) $
-        binterpret (interpret mkOpt) id
-          . epStruct
+        epMap = endpointToParser <$> eps
     pickMethod :: HTTP.Method -> Parser x -> Mod CommandFields x
     pickMethod m p = command (T.unpack . T.decodeUtf8 $ m) $ info (p <**> helper) mempty
     mkRaw :: Endpoint (HTTP.Method -> x) -> Parser x
-    mkRaw e = mkEndpoint e <*> o
+    mkRaw e = endpointToParser e <*> o
       where
         o =
           strOption @HTTP.Method $
@@ -268,6 +260,28 @@ structParser_ = cata go
               <> completeWith (show <$> [HTTP.GET ..])
     mkRawCommand :: Endpoint (HTTP.Method -> x) -> Mod CommandFields x
     mkRawCommand d = command "RAW" $ info (mkRaw d <**> helper) mempty
+
+-- | Convert an 'Opt' into an optparse-applicative 'Parser'.
+mkOpt :: Opt x -> Parser x
+mkOpt Opt {..} = forI optRead $ \case
+  ORRequired r -> option r mods
+  OROptional r -> optional $ option r mods
+  ORSwitch -> switch $ long optName <> help optDesc
+  ORMany r -> many $ option r mods
+  where
+    mods :: Mod OptionFields y
+    mods =
+      long optName
+        <> help optDesc
+        <> metavar optMeta
+        <> foldMap (completeWith . toList) optVals
+
+-- | Convert an 'Endpoint' into an optparse-applicative 'Parser'.
+endpointToParser :: Endpoint x -> Parser x
+endpointToParser =
+  unsafeApply (Proxy @Parser) $
+    binterpret (interpret mkOpt) id
+      . epStruct
 
 -- | Combine two 'EndpointMap's, preferring the left hand side for
 -- conflicts.  If the left hand has a raw endpoint, the right hand's

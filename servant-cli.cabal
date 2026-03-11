@@ -39,6 +39,7 @@ library
   exposed-modules:
       Servant.CLI
       Servant.CLI.HasCLI
+      Servant.CLI.Internal.FlatParser
       Servant.CLI.Internal.PStruct
       Servant.CLI.ParseBody
   other-modules:

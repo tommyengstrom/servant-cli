@@ -132,7 +132,7 @@ withServer action =
 
 main :: IO ()
 main = do
-    c <- parseClientPrettyWithContext
+    c <- parseClientPrettyFlatWithContext
                     testApi
                     (Proxy :: Proxy ClientM)
                     (getPwd :& RNil)

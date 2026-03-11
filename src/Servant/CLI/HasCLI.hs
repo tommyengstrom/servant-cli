@@ -287,7 +287,8 @@ instance
             optVals = NE.nonEmpty _paramValues,
             optRead = case sbool @(FoldRequired mods) of
               STrue -> orRequired r
-              SFalse -> orOptional r
+              SFalse -> orOptional r,
+            optKind = OptQuery
           }
       r = eitherReader $ first T.unpack . parseQueryParam @a . T.pack
       pType = show $ typeRep @a
@@ -331,7 +332,8 @@ instance
             optDesc = _paramDesc,
             optMeta = printf "<%s>" pName,
             optVals = NE.nonEmpty _paramValues,
-            optRead = orSwitch
+            optRead = orSwitch,
+            optKind = OptQuery
           }
       pName = symbolVal (Proxy @sym)
       DocQueryParam {..} = toParam (Proxy @(QueryFlag sym))
@@ -378,7 +380,8 @@ instance
             optDesc = printf "%s (%s)" _paramDesc valSpec,
             optMeta = map toUpper pType,
             optVals = NE.nonEmpty _paramValues,
-            optRead = orMany r
+            optRead = orMany r,
+            optKind = OptQuery
           }
       r = eitherReader $ first T.unpack . parseQueryParam @a . T.pack
       pType = show $ typeRep @a
@@ -549,7 +552,8 @@ instance
             optVals = Nothing,
             optRead = case sbool @(FoldRequired mods) of
               STrue -> orRequired r
-              SFalse -> orOptional r
+              SFalse -> orOptional r,
+            optKind = OptHeader
           }
       r :: ReadM a
       r = eitherReader $ first T.unpack . parseHeader . T.encodeUtf8 . T.pack
