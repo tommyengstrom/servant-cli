@@ -4,27 +4,33 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE TypeOperators         #-}
 {-# OPTIONS_GHC -fno-warn-orphans  #-}
 
 import           Control.Concurrent
-import           Control.Exception
+import           Control.Exception (bracket)
+import           Control.Monad.Error.Class (throwError)
 import           Control.Monad.IO.Class
 import           Data.Aeson
 import           Data.Maybe
 import           Data.Proxy
 import           Data.Text                (Text)
-import           Data.Vinyl
+import           Data.Vinyl               (Rec(RNil, (:&)))
 import           GHC.Generics
 import           Network.HTTP.Client      (newManager, defaultManagerSettings)
+import           Network.HTTP.Types.Status (statusCode, statusMessage)
 import           Network.Wai.Handler.Warp (run)
 import           Options.Applicative      (header, progDesc)
 import           Servant.API
 import           Servant.CLI
 import           Servant.Client
 import           Servant.Server
+import           System.Exit               (exitFailure)
+import           System.IO                (hPutStrLn, stderr)
 import           System.Random
-import qualified Data.ByteString          as BS
+import qualified Data.ByteString.Char8    as BS
+import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map                 as M
 import qualified Data.Text                as T
 
@@ -74,6 +80,11 @@ type TestApi =
            :<|> BasicAuth "login" Int
              :> Post '[JSON] NoContent
               )
+   :<|> Summary "List users"
+           :> "auth"
+           :> "listUsers"
+           :> Header "authorization" Text
+           :> Get '[JSON] [Text]
    :<|> Summary "Deep paths test"
            :> "dig"
            :> "down"
@@ -98,6 +109,9 @@ server = serveWithContext testApi (authCheck :. EmptyContext) $
    :<|> (\(Greet g) -> pure (T.length g)
                   :<|> (\_ -> pure NoContent)
         )
+   :<|> (\case Just "hunter2" -> pure ["john", "hunter"]
+               _              -> throwError err401
+        )
    :<|> (pure . T.reverse)
   where
     -- | Map of valid users and passwords
@@ -118,16 +132,11 @@ withServer action =
 
 main :: IO ()
 main = do
-    c <- parseHandleClientWithContext
+    c <- parseClientPrettyWithContext
                     testApi
                     (Proxy :: Proxy ClientM)
                     (getPwd :& RNil)
-                    cinfo $
-            (\(Greet g) -> "Greeting: " ++ T.unpack g)
-       :<|> ( (\i -> show i ++ " letters")
-         :<|> (\_ -> "posted!")
-            )
-       :<|> (\s -> "Reversed: " ++ T.unpack s)
+                    cinfo
 
     withServer $ do
 
@@ -135,8 +144,21 @@ main = do
         res      <- runClientM c (mkClientEnv manager' (BaseUrl Http "localhost" 8081 ""))
 
         case res of
-          Left e        -> throwIO e
-          Right rstring -> putStrLn rstring
+          Left (FailureResponse _ resp) -> do
+            let status = responseStatusCode resp
+                code   = statusCode status
+                reason = BS.unpack $ statusMessage status
+                body   = BSL.unpack $ responseBody resp
+            hPutStrLn stderr $ "Error: " ++ show code ++ " " ++ reason
+                ++ if null body then "" else " — " ++ body
+            exitFailure
+          Left (ConnectionError e) -> do
+            hPutStrLn stderr $ "Connection error: " ++ show e
+            exitFailure
+          Left e -> do
+            hPutStrLn stderr $ "Error: " ++ show e
+            exitFailure
+          Right bs -> BSL.putStrLn bs
   where
     cinfo = header "greet" <> progDesc "Greet API"
     getPwd :: ContextFor ClientM (BasicAuth "login" Int)

@@ -36,6 +36,11 @@ module Servant.CLI
     parseClientWithContext,
     parseHandleClientWithContext,
 
+    -- ** Pretty-printing
+    CLIPrettyPrint (..),
+    parseClientPretty,
+    parseClientPrettyWithContext,
+
     -- * Typeclasses
     HasCLI (CLIResult, CLIHandler, cliHandler),
 
@@ -66,14 +71,65 @@ module Servant.CLI
   )
 where
 
+import Data.Aeson (ToJSON)
+import Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Data.ByteString.Lazy as BSL
 import Data.Proxy
 import Data.Vinyl
+import Data.Void
 import Options.Applicative
+import Servant.API (NoContent)
 import Servant.CLI.HasCLI
 import Servant.CLI.Internal.PStruct
 import Servant.CLI.ParseBody
 import Servant.Client.Core
 import Servant.Docs.Internal
+
+-- | Class for pretty-printing CLI results. Endpoint response types with
+-- 'ToJSON' instances are pretty-printed as JSON. 'Either' (from @:\<|>@
+-- branches) is handled by dispatching to the appropriate branch.
+class CLIPrettyPrint a where
+  cliPrettyPrint :: a -> BSL.ByteString
+
+instance {-# OVERLAPPABLE #-} ToJSON a => CLIPrettyPrint a where
+  cliPrettyPrint = encodePretty
+
+instance {-# OVERLAPPING #-} (CLIPrettyPrint a, CLIPrettyPrint b) => CLIPrettyPrint (Either a b) where
+  cliPrettyPrint = either cliPrettyPrint cliPrettyPrint
+
+instance {-# OVERLAPPING #-} CLIPrettyPrint NoContent where
+  cliPrettyPrint _ = BSL.empty
+
+instance {-# OVERLAPPING #-} CLIPrettyPrint Void where
+  cliPrettyPrint = absurd
+
+-- | Like 'parseClient', but pretty-prints the JSON response.
+parseClientPretty ::
+  (HasCLI m api '[], CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m BSL.ByteString)
+parseClientPretty pa pm im =
+  fmap cliPrettyPrint <$> parseClient pa pm im
+
+-- | Like 'parseClientWithContext', but pretty-prints the JSON response.
+parseClientPrettyWithContext ::
+  (HasCLI m api context, CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | API
+  Proxy api ->
+  -- | Client monad
+  Proxy m ->
+  -- | Extra context
+  Rec (ContextFor m) context ->
+  -- | Options for top-level display
+  InfoMod (m (CLIResult m api)) ->
+  IO (m BSL.ByteString)
+parseClientPrettyWithContext pa pm p im =
+  fmap cliPrettyPrint <$> parseClientWithContext pa pm p im
 
 -- | A version of 'cliPStruct' that can be used if the API requires
 -- any external context to generate runtime data.

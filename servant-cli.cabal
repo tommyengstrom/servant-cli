@@ -47,7 +47,9 @@ library
       src
   ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wredundant-constraints -Werror=incomplete-patterns
   build-depends:
-      base >=4.12 && <5
+      aeson
+    , aeson-pretty
+    , base >=4.12 && <5
     , bytestring
     , case-insensitive
     , containers
@@ -72,13 +74,15 @@ executable greet-cli
       Paths_servant_cli
   hs-source-dirs:
       example
-  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wredundant-constraints -Werror=incomplete-patterns
+  ghc-options: -Wall -Wcompat -Wincomplete-record-updates -Wredundant-constraints -Werror=incomplete-patterns -threaded
   build-depends:
       aeson
     , base >=4.12 && <5
     , bytestring
     , containers
     , http-client
+    , http-types
+    , mtl
     , optparse-applicative
     , random
     , servant >=0.15
