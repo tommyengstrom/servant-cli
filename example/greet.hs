@@ -133,7 +133,8 @@ withServer action =
 
 main :: IO ()
 main = do
-    c <- parseClientPrettyFlatWithContext
+    (url, c) <- parseClientPrettyFlatWithContext
+                    (Just (BaseUrl Http "localhost" 8081 ""))
                     testApi
                     (Proxy :: Proxy ClientM)
                     RNil
@@ -142,7 +143,7 @@ main = do
     withServer $ do
 
         manager' <- newManager defaultManagerSettings
-        res      <- runClientM c (mkClientEnv manager' (BaseUrl Http "localhost" 8081 ""))
+        res      <- runClientM c (mkClientEnv manager' url)
 
         case res of
           Left (FailureResponse _ resp) -> do

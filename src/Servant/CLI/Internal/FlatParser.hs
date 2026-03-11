@@ -32,11 +32,14 @@ module Servant.CLI.Internal.FlatParser
     -- * Helpers
     runReadM,
     preprocessArgs,
+    extractBaseUrl,
+    resolveBaseUrl,
   )
 where
 
-import Data.Functor.Combinator (Day (..))
+import Control.Exception (SomeException, try)
 import Control.Monad (when)
+import Data.Functor.Combinator (Day (..))
 import Data.List (intercalate, isPrefixOf, nub)
 import qualified Data.Map as M
 import qualified Data.Text as T
@@ -45,6 +48,7 @@ import GHC.Generics ((:+:) (..))
 import qualified Network.HTTP.Types as HTTP
 import Options.Applicative
 import Servant.CLI.Internal.PStruct
+import Servant.Client.Core (BaseUrl (..), parseBaseUrl, showBaseUrl)
 import System.Environment (getArgs)
 import System.Exit (exitFailure, exitSuccess)
 import System.IO (hPutStrLn, stderr)
@@ -287,6 +291,33 @@ extractVerbose (x : rest) =
   let (v, rest') = extractVerbose rest
    in (v, x : rest')
 
+-- | Extract @--base-url URL@ from a list of arguments.
+extractBaseUrl :: [String] -> (Maybe String, [String])
+extractBaseUrl [] = (Nothing, [])
+extractBaseUrl ("--base-url" : u : rest) =
+  let (_, rest') = extractBaseUrl rest
+   in (Just u, rest')
+extractBaseUrl (x : rest) =
+  let (mu, rest') = extractBaseUrl rest
+   in (mu, x : rest')
+
+-- | Resolve the base URL from CLI arg and optional default.
+-- CLI arg takes priority over default. If neither is provided, error.
+resolveBaseUrl :: Maybe BaseUrl -> Maybe String -> IO BaseUrl
+resolveBaseUrl mDefault mCliArg = case mCliArg of
+  Just s -> do
+    result <- try (parseBaseUrl s) :: IO (Either SomeException BaseUrl)
+    case result of
+      Right url -> pure url
+      Left err -> do
+        hPutStrLn stderr $ "Error: invalid --base-url: " ++ show err
+        exitFailure
+  Nothing -> case mDefault of
+    Just url -> pure url
+    Nothing -> do
+      hPutStrLn stderr "Error: --base-url is required (no default configured)"
+      exitFailure
+
 -- | Pretty-print a list of routes, one line per method.
 printRoutes :: Bool -> [RouteInfo] -> IO ()
 printRoutes verbose routes = mapM_ printRoute routes
@@ -295,7 +326,7 @@ printRoutes verbose routes = mapM_ printRoute routes
       let path = formatRoute riPattern
       mapM_ (\m -> putStrLn $ "  " ++ m ++ "\t" ++ path) riMethods
       when (verbose && not (null riInfo)) $
-        putStrLn $ "    " ++ intercalate " — " riInfo
+        putStr $ concatMap (\s -> "    " ++ s ++ "\n") riInfo
 
 -- | Print endpoint help (query params, headers, docs).
 printEndpointHelp :: [PathSeg] -> HTTP.Method -> Endpoint a -> [String] -> IO ()
@@ -305,9 +336,8 @@ printEndpointHelp pat method ep epInfo = do
   putStrLn $ "  " ++ mStr ++ " " ++ path
   case epInfo of
     [] -> pure ()
-    infos -> do
-      let desc = intercalate " — " infos
-      putStrLn $ "    " ++ desc
+    infos ->
+      putStr $ concatMap (\s -> "    " ++ s ++ "\n") infos
   -- Show options from the endpoint parser's help
   let parser = endpointToParser ep
       pinfo = info (parser <**> helper) (fullDesc <> header (mStr ++ " " ++ path))
@@ -327,18 +357,27 @@ printEndpointHelp pat method ep epInfo = do
             || "-" `isPrefixOf` stripped
 
 -- | Main entry point: flat curl-style parser for a 'PStruct'.
-flatStructParser :: PStruct a -> InfoMod a -> IO a
-flatStructParser ps _im = do
+--
+-- Takes an optional default 'BaseUrl'. If provided, @--base-url@ becomes
+-- optional on the CLI; otherwise it is required.
+-- Returns a pair of the resolved 'BaseUrl' and the parsed result.
+flatStructParser :: Maybe BaseUrl -> PStruct a -> InfoMod a -> IO (BaseUrl, a)
+flatStructParser mDefaultUrl ps _im = do
   argv <- getArgs
-  let (verbose, argv') = extractVerbose argv
+  let (verbose, argv1) = extractVerbose argv
+      (mCliUrl, argv') = extractBaseUrl argv1
   case argv' of
     [] -> do
-      printUsage verbose ps
+      printUsage verbose mDefaultUrl ps
       exitSuccess
     ["--help"] -> do
-      printUsage verbose ps
+      printUsage verbose mDefaultUrl ps
+      exitSuccess
+    ["-h"] -> do
+      printUsage verbose mDefaultUrl ps
       exitSuccess
     _ -> do
+      baseUrl <- resolveBaseUrl mDefaultUrl mCliUrl
       let (mMethod, pathSegs, extraArgs) = preprocessArgs argv'
           mMethod' = mMethod <|> if "-d" `elem` extraArgs then Just (T.encodeUtf8 (T.pack "POST")) else Nothing
       case matchRoute ps pathSegs of
@@ -358,21 +397,37 @@ flatStructParser ps _im = do
               printRoutes verbose routes'
               exitSuccess
         FullMatch epInfo epMap -> do
-          -- Check for --help
-          if "--help" `elem` extraArgs
+          -- Check for --help / -h
+          if "--help" `elem` extraArgs || "-h" `elem` extraArgs
             then do
               printEndpointMapHelp pathSegs epMap epInfo
               exitSuccess
-            else
-              runEndpoint mMethod' epMap extraArgs
+            else do
+              result <- runEndpoint mMethod' epMap extraArgs
+              pure (baseUrl, result)
 
--- | Print usage: list all routes.
-printUsage :: Bool -> PStruct a -> IO ()
-printUsage verbose ps = do
+-- | Print usage: list all routes, followed by global options.
+printUsage :: Bool -> Maybe BaseUrl -> PStruct a -> IO ()
+printUsage verbose mDefaultUrl ps = do
   let routes = enumerateRoutes ps
   if null routes
     then putStrLn "No endpoints available"
     else printRoutes verbose routes
+  printGlobalOptions mDefaultUrl
+
+-- | Print the global options block.
+printGlobalOptions :: Maybe BaseUrl -> IO ()
+printGlobalOptions mDefaultUrl = do
+  putStrLn ""
+  putStrLn "Global options:"
+  let urlDefault = case mDefaultUrl of
+        Just url -> "(default: " ++ showBaseUrl url ++ ")"
+        Nothing -> "(required)"
+  putStrLn $ "  --base-url URL    Server base URL " ++ urlDefault
+  putStrLn   "  -X METHOD         HTTP method (GET, POST, PUT, DELETE, etc.)"
+  putStrLn   "  -v, --verbose     Show route descriptions"
+  putStrLn   "  -H \"Name: Value\"  Set a request header"
+  putStrLn   "  -h, --help        Show this help text"
 
 -- | Print help for all methods in an endpoint map.
 printEndpointMapHelp :: [String] -> EndpointMap a -> [String] -> IO ()

@@ -75,6 +75,12 @@ module Servant.CLI
     ParamKind (..),
     ToAuthInfo (..),
     DocAuthentication (..),
+
+    -- ** Base URL
+    BaseUrl (..),
+    Scheme (..),
+    parseBaseUrl,
+    showBaseUrl,
   )
 where
 
@@ -294,20 +300,28 @@ parseHandleClient pa pm = parseHandleClientWithContext pa pm RNil
 
 -- | Like 'parseClient', but uses the flat curl-style parser.
 -- Routes are specified as URL paths instead of nested subcommands.
+--
+-- Takes an optional default 'BaseUrl'. Returns the resolved 'BaseUrl'
+-- alongside the client action, so the caller can use it to create
+-- a 'ClientEnv'.
 parseClientFlat ::
   (HasCLI m api '[]) =>
+  -- | Default base URL (if 'Nothing', @--base-url@ is required)
+  Maybe BaseUrl ->
   -- | API
   Proxy api ->
   -- | Client monad
   Proxy m ->
   -- | Options for top-level display
   InfoMod (m (CLIResult m api)) ->
-  IO (m (CLIResult m api))
-parseClientFlat pa pm = parseClientFlatWithContext pa pm RNil
+  IO (BaseUrl, m (CLIResult m api))
+parseClientFlat mUrl pa pm = parseClientFlatWithContext mUrl pa pm RNil
 
 -- | Like 'parseClientFlat', but with context.
 parseClientFlatWithContext ::
   (HasCLI m api context) =>
+  -- | Default base URL (if 'Nothing', @--base-url@ is required)
+  Maybe BaseUrl ->
   -- | API
   Proxy api ->
   -- | Client monad
@@ -316,26 +330,30 @@ parseClientFlatWithContext ::
   Rec (ContextFor m) context ->
   -- | Options for top-level display
   InfoMod (m (CLIResult m api)) ->
-  IO (m (CLIResult m api))
-parseClientFlatWithContext pa pm p im =
-  flatStructParser (cliPStructWithContext pm pa p) im
+  IO (BaseUrl, m (CLIResult m api))
+parseClientFlatWithContext mUrl pa pm p im =
+  flatStructParser mUrl (cliPStructWithContext pm pa p) im
 
 -- | Like 'parseClientFlat', but pretty-prints the JSON response.
 parseClientPrettyFlat ::
   (HasCLI m api '[], CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | Default base URL (if 'Nothing', @--base-url@ is required)
+  Maybe BaseUrl ->
   -- | API
   Proxy api ->
   -- | Client monad
   Proxy m ->
   -- | Options for top-level display
   InfoMod (m (CLIResult m api)) ->
-  IO (m BSL.ByteString)
-parseClientPrettyFlat pa pm im =
-  fmap cliPrettyPrint <$> parseClientFlat pa pm im
+  IO (BaseUrl, m BSL.ByteString)
+parseClientPrettyFlat mUrl pa pm im =
+  fmap (fmap cliPrettyPrint) <$> parseClientFlat mUrl pa pm im
 
 -- | Like 'parseClientPrettyFlat', but with context.
 parseClientPrettyFlatWithContext ::
   (HasCLI m api context, CLIPrettyPrint (CLIResult m api), Functor m) =>
+  -- | Default base URL (if 'Nothing', @--base-url@ is required)
+  Maybe BaseUrl ->
   -- | API
   Proxy api ->
   -- | Client monad
@@ -344,6 +362,6 @@ parseClientPrettyFlatWithContext ::
   Rec (ContextFor m) context ->
   -- | Options for top-level display
   InfoMod (m (CLIResult m api)) ->
-  IO (m BSL.ByteString)
-parseClientPrettyFlatWithContext pa pm p im =
-  fmap cliPrettyPrint <$> parseClientFlatWithContext pa pm p im
+  IO (BaseUrl, m BSL.ByteString)
+parseClientPrettyFlatWithContext mUrl pa pm p im =
+  fmap (fmap cliPrettyPrint) <$> parseClientFlatWithContext mUrl pa pm p im
