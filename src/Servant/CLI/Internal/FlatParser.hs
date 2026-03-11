@@ -36,7 +36,8 @@ module Servant.CLI.Internal.FlatParser
 where
 
 import Data.Functor.Combinator (Day (..))
-import Data.List (intercalate, isPrefixOf)
+import Control.Monad (when)
+import Data.List (intercalate, isPrefixOf, nub)
 import qualified Data.Map as M
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -64,12 +65,13 @@ data RouteInfo = RouteInfo
 
 -- | Enumerate all routes in a 'PStruct' for display.
 enumerateRoutes :: PStruct a -> [RouteInfo]
-enumerateRoutes = go []
+enumerateRoutes = go [] []
   where
-    go :: [PathSeg] -> PStruct a -> [RouteInfo]
-    go prefix (PStruct infos comps caps eps) =
+    go :: [String] -> [PathSeg] -> PStruct a -> [RouteInfo]
+    go accInfo prefix (PStruct infos comps caps eps) =
       epRoutes ++ compRoutes ++ capRoutes
       where
+        allInfo = nub (accInfo ++ infos)
         methods = map methodStr (M.keys (epmGiven eps))
         hasRaw = case epmRaw eps of
           Nothing -> False
@@ -78,16 +80,16 @@ enumerateRoutes = go []
           | null methods && not hasRaw = []
           | otherwise =
               let ms = methods ++ ["RAW" | hasRaw]
-               in [RouteInfo (reverse prefix) ms infos]
+               in [RouteInfo (reverse prefix) ms allInfo]
         compRoutes =
           M.foldMapWithKey
-            (\k sub -> go (PathLit k : prefix) sub)
+            (\k sub -> go allInfo (PathLit k : prefix) sub)
             comps
         capRoutes = case caps of
           Nothing -> []
           Just cap -> case cap of
             L1 (Day arg sub _) ->
-              go (PathCap (argName arg) : prefix) sub
+              go allInfo (PathCap (argName arg) : prefix) sub
             R1 (Day (MultiArg arg) epMap _) ->
               let ms = map methodStr (M.keys (epmGiven epMap))
                   hasRaw' = case epmRaw epMap of
@@ -95,7 +97,7 @@ enumerateRoutes = go []
                     Just _ -> True
                   ms' = ms ++ ["RAW" | hasRaw']
                   pat = reverse (PathCap (argName arg ++ "...") : prefix)
-               in [RouteInfo pat ms' [] | not (null ms')]
+               in [RouteInfo pat ms' allInfo | not (null ms')]
 
 -- | Result of matching a path against the PStruct tree.
 data MatchOutcome a
@@ -124,7 +126,7 @@ matchRoute root = go [] [] root True
               || case psCaptures ps of
                 Nothing -> False
                 Just _ -> True
-          allInfo = acc ++ psInfo ps
+          allInfo = nub (acc ++ psInfo ps)
        in if hasMethods
             then FullMatch allInfo eps
             else
@@ -132,8 +134,7 @@ matchRoute root = go [] [] root True
                 then PrefixMatch ps
                 else NoMatch "No endpoints or sub-paths found at this path"
     go matched acc ps isRoot (seg : rest) =
-      -- Only accumulate info from non-root nodes (root has merged info from all :<|> branches)
-      let acc' = if isRoot then acc else acc ++ psInfo ps
+      let acc' = if isRoot then acc else nub (acc ++ psInfo ps)
        in case M.lookup seg (psComponents ps) of
             Just sub -> go (matched ++ [seg]) acc' sub False rest
             Nothing -> case psCaptures ps of
@@ -277,13 +278,24 @@ formatRoute segs = concatMap fmt segs
     fmt (PathLit s) = "/" ++ s
     fmt (PathCap s) = "/:" ++ s
 
+-- | Extract @-v@/@--verbose@ from a list of arguments.
+extractVerbose :: [String] -> (Bool, [String])
+extractVerbose [] = (False, [])
+extractVerbose ("-v" : rest) = (True, snd (extractVerbose rest))
+extractVerbose ("--verbose" : rest) = (True, snd (extractVerbose rest))
+extractVerbose (x : rest) =
+  let (v, rest') = extractVerbose rest
+   in (v, x : rest')
+
 -- | Pretty-print a list of routes, one line per method.
-printRoutes :: [RouteInfo] -> IO ()
-printRoutes routes = mapM_ printRoute routes
+printRoutes :: Bool -> [RouteInfo] -> IO ()
+printRoutes verbose routes = mapM_ printRoute routes
   where
-    printRoute RouteInfo {..} =
+    printRoute RouteInfo {..} = do
       let path = formatRoute riPattern
-       in mapM_ (\m -> putStrLn $ "  " ++ m ++ "\t" ++ path) riMethods
+      mapM_ (\m -> putStrLn $ "  " ++ m ++ "\t" ++ path) riMethods
+      when (verbose && not (null riInfo)) $
+        putStrLn $ "    " ++ intercalate " — " riInfo
 
 -- | Print endpoint help (query params, headers, docs).
 printEndpointHelp :: [PathSeg] -> HTTP.Method -> Endpoint a -> [String] -> IO ()
@@ -318,15 +330,16 @@ printEndpointHelp pat method ep epInfo = do
 flatStructParser :: PStruct a -> InfoMod a -> IO a
 flatStructParser ps _im = do
   argv <- getArgs
-  case argv of
+  let (verbose, argv') = extractVerbose argv
+  case argv' of
     [] -> do
-      printUsage ps
+      printUsage verbose ps
       exitSuccess
     ["--help"] -> do
-      printUsage ps
+      printUsage verbose ps
       exitSuccess
     _ -> do
-      let (mMethod, pathSegs, extraArgs) = preprocessArgs argv
+      let (mMethod, pathSegs, extraArgs) = preprocessArgs argv'
           mMethod' = mMethod <|> if "-d" `elem` extraArgs then Just (T.encodeUtf8 (T.pack "POST")) else Nothing
       case matchRoute ps pathSegs of
         NoMatch err -> do
@@ -342,7 +355,7 @@ flatStructParser ps _im = do
               hPutStrLn stderr "No endpoints found at this path"
               exitFailure
             else do
-              printRoutes routes'
+              printRoutes verbose routes'
               exitSuccess
         FullMatch epInfo epMap -> do
           -- Check for --help
@@ -354,12 +367,12 @@ flatStructParser ps _im = do
               runEndpoint mMethod' epMap extraArgs
 
 -- | Print usage: list all routes.
-printUsage :: PStruct a -> IO ()
-printUsage ps = do
+printUsage :: Bool -> PStruct a -> IO ()
+printUsage verbose ps = do
   let routes = enumerateRoutes ps
   if null routes
     then putStrLn "No endpoints available"
-    else printRoutes routes
+    else printRoutes verbose routes
 
 -- | Print help for all methods in an endpoint map.
 printEndpointMapHelp :: [String] -> EndpointMap a -> [String] -> IO ()

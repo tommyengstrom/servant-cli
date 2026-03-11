@@ -300,11 +300,30 @@ altEPM (EPM e1 r1) (EPM e2 r2) = EPM e3 r3
       Nothing -> M.unionWith const e1 e2
     r3 = r1 <|> r2
 
-altPStruct :: PStruct a -> PStruct a -> PStruct a
-altPStruct (PStruct ns1 cs1 c1 ep1) (PStruct ns2 cs2 c2 ep2) =
-  PStruct ns3 cs3 c3 ep3
+-- | Prepend info strings to a 'PStruct'.
+prependInfo :: [String] -> PStruct x -> PStruct x
+prependInfo ns (PStruct ms cs' c'' ep') = PStruct (ns ++ ms) cs' c'' ep'
+
+-- | Push a node's 'psInfo' down into its children so that per-branch
+-- info survives merging in 'altPStruct'.
+sinkInfo :: PStruct a -> PStruct a
+sinkInfo ps@(PStruct ns cs c ep)
+  | null ns = ps
+  | M.null cs && isNothing c = ps -- leaf (endpoints only), keep info here
+  | otherwise = PStruct ns' (prependInfo ns <$> cs) c' ep
   where
-    ns3 = ns1 ++ ns2 -- ??
+    c' = fmap pushCap c
+    pushCap (L1 (Day arg sub f)) = L1 (Day arg (prependInfo ns sub) f)
+    pushCap r1 = r1
+    pushed = not (M.null cs) || case c of Just (L1 _) -> True; _ -> False
+    ns' = if pushed then [] else ns
+
+altPStruct :: PStruct a -> PStruct a -> PStruct a
+altPStruct ps1' ps2' = PStruct ns3 cs3 c3 ep3
+  where
+    PStruct ns1 cs1 c1 ep1 = sinkInfo ps1'
+    PStruct ns2 cs2 c2 ep2 = sinkInfo ps2'
+    ns3 = ns1 ++ ns2
     cs3 = case c1 of
       Just _ -> cs1
       Nothing -> M.unionWith altPStruct cs1 cs2
