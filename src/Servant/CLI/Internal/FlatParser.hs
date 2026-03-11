@@ -112,9 +112,9 @@ data MatchOutcome a
 -- For captures, runs the capture's 'argRead' via 'runReadM' and applies
 -- the parsed value.
 matchRoute :: PStruct a -> [String] -> MatchOutcome a
-matchRoute root = go [] root True
+matchRoute root = go [] [] root True
   where
-    go acc ps isRoot [] =
+    go _matched acc ps _isRoot [] =
       let eps = psEndpoints ps
           hasMethods = not (M.null (epmGiven eps)) || case epmRaw eps of
             Nothing -> False
@@ -131,11 +131,11 @@ matchRoute root = go [] root True
               if hasChildren
                 then PrefixMatch ps
                 else NoMatch "No endpoints or sub-paths found at this path"
-    go acc ps isRoot (seg : rest) =
+    go matched acc ps isRoot (seg : rest) =
       -- Only accumulate info from non-root nodes (root has merged info from all :<|> branches)
       let acc' = if isRoot then acc else acc ++ psInfo ps
        in case M.lookup seg (psComponents ps) of
-            Just sub -> go acc' sub False rest
+            Just sub -> go (matched ++ [seg]) acc' sub False rest
             Nothing -> case psCaptures ps of
               Just (L1 (Day arg sub f)) ->
                 case runReadM (argRead arg) seg of
@@ -146,7 +146,7 @@ matchRoute root = go [] root True
                         ++ ": "
                         ++ err
                   Right val ->
-                    go acc' (fmap (\g -> f val g) sub) False rest
+                    go (matched ++ [seg]) acc' (fmap (\g -> f val g) sub) False rest
               Just (R1 (Day (MultiArg arg) epMap f)) ->
                 -- CaptureAll: consume all remaining segments
                 case traverse (runReadM (argRead arg)) (seg : rest) of
@@ -159,7 +159,24 @@ matchRoute root = go [] root True
                   Right vals ->
                     FullMatch acc' (fmap (\g -> f vals g) epMap)
               Nothing ->
-                NoMatch $ "Unknown path segment: " ++ seg
+                let prefixSegs = map PathLit matched
+                    availRoutes = enumerateRoutes ps
+                    routeLines =
+                      map
+                        (\r -> formatRoute (prefixSegs ++ riPattern r))
+                        availRoutes
+                    prefixPath = formatRoute prefixSegs
+                    availMsg = case routeLines of
+                      [] -> ""
+                      xs ->
+                        "\n  Available routes:"
+                          ++ concatMap (\x -> "\n    " ++ x) xs
+                 in NoMatch $
+                      "No match for \""
+                        ++ seg
+                        ++ "\" after "
+                        ++ prefixPath
+                        ++ availMsg
 
 -- | Run a 'ReadM' parser on a single string value.
 runReadM :: ReadM a -> String -> Either String a
@@ -173,25 +190,18 @@ runReadM rm s = case execParserPure defaultPrefs p [s] of
 -- | Pre-process argv into (maybe method, path segments, extra args).
 --
 -- Handles:
---   * Optional leading HTTP method (GET, POST, etc.)
+--   * @-X METHOD@ for specifying HTTP method (curl-style)
 --   * Path string split on @/@
 --   * Query params from @?key=value@ in the path
 --   * @-H "name: value"@ rewritten to @--header-name value@
 preprocessArgs :: [String] -> (Maybe HTTP.Method, [String], [String])
 preprocessArgs [] = (Nothing, [], [])
 preprocessArgs args =
-  let knownMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
-      (mMethod, rest) = case args of
-        (m : xs)
-          | map id m `elem` knownMethods ->
-              (Just (T.encodeUtf8 (T.pack m)), xs)
-        _ -> (Nothing, args)
-      (pathStr, extraArgs) = case rest of
-        [] -> ("", [])
+  let (pathStr, extraArgs) = case args of
         (p : xs)
           | "/" `isPrefixOf` p -> (p, xs)
           | not ("-" `isPrefixOf` p) -> ("/" ++ p, xs)
-          | otherwise -> ("", rest)
+        _ -> ("", args)
       -- Split ?query from path
       (pathPart, queryPart) = break (== '?') pathStr
       -- Parse path segments
@@ -200,9 +210,19 @@ preprocessArgs args =
       queryArgs = case queryPart of
         ('?' : qs) -> concatMap queryToArg (splitQueryString qs)
         _ -> []
+      -- Extract -X METHOD from extra args
+      (mMethod, extraArgs') = extractMethod extraArgs
       -- Rewrite -H "name: value" into --header-name value
-      rewrittenArgs = rewriteHeaders extraArgs
+      rewrittenArgs = rewriteHeaders extraArgs'
    in (mMethod, pathSegs, queryArgs ++ rewrittenArgs)
+
+-- | Extract @-X METHOD@ from a list of arguments.
+extractMethod :: [String] -> (Maybe HTTP.Method, [String])
+extractMethod [] = (Nothing, [])
+extractMethod ("-X" : m : rest) = (Just (T.encodeUtf8 (T.pack m)), rest)
+extractMethod (x : rest) =
+  let (mMethod, rest') = extractMethod rest
+   in (mMethod, x : rest')
 
 -- | Split a string on a delimiter.
 splitOn :: Char -> String -> [String]
@@ -257,14 +277,13 @@ formatRoute segs = concatMap fmt segs
     fmt (PathLit s) = "/" ++ s
     fmt (PathCap s) = "/:" ++ s
 
--- | Pretty-print a list of routes.
+-- | Pretty-print a list of routes, one line per method.
 printRoutes :: [RouteInfo] -> IO ()
 printRoutes routes = mapM_ printRoute routes
   where
     printRoute RouteInfo {..} =
       let path = formatRoute riPattern
-          ms = intercalate "," riMethods
-       in putStrLn $ "  " ++ ms ++ "\t" ++ path
+       in mapM_ (\m -> putStrLn $ "  " ++ m ++ "\t" ++ path) riMethods
 
 -- | Print endpoint help (query params, headers, docs).
 printEndpointHelp :: [PathSeg] -> HTTP.Method -> Endpoint a -> [String] -> IO ()
@@ -308,6 +327,7 @@ flatStructParser ps _im = do
       exitSuccess
     _ -> do
       let (mMethod, pathSegs, extraArgs) = preprocessArgs argv
+          mMethod' = mMethod <|> if "-d" `elem` extraArgs then Just (T.encodeUtf8 (T.pack "POST")) else Nothing
       case matchRoute ps pathSegs of
         NoMatch err -> do
           hPutStrLn stderr $ "Error: " ++ err
@@ -331,7 +351,7 @@ flatStructParser ps _im = do
               printEndpointMapHelp pathSegs epMap epInfo
               exitSuccess
             else
-              runEndpoint mMethod epMap extraArgs
+              runEndpoint mMethod' epMap extraArgs
 
 -- | Print usage: list all routes.
 printUsage :: PStruct a -> IO ()
@@ -366,7 +386,7 @@ runEndpoint mMethod (EPM eps rw) extraArgs = do
                 "Method "
                   ++ methodStr m
                   ++ " not available. Available: "
-                  ++ intercalate ", " (map methodStr methods)
+                  ++ intercalate ", " (map (\x -> "-X " ++ methodStr x) methods)
               exitFailure
     Nothing ->
       case methods of
@@ -379,7 +399,7 @@ runEndpoint mMethod (EPM eps rw) extraArgs = do
         [] ->
           case rw of
             Just _ -> do
-              hPutStrLn stderr "Raw endpoint requires explicit method (GET, POST, etc.)"
+              hPutStrLn stderr "Raw endpoint requires explicit method (-X GET, -X POST, etc.)"
               exitFailure
             Nothing -> do
               hPutStrLn stderr "No endpoints at this path"
@@ -387,7 +407,7 @@ runEndpoint mMethod (EPM eps rw) extraArgs = do
         _ -> do
           hPutStrLn stderr $
             "Multiple methods available. Specify one: "
-              ++ intercalate ", " (map methodStr methods)
+              ++ intercalate ", " (map (\x -> "-X " ++ methodStr x) methods)
           exitFailure
 
 -- | Run an endpoint's option parser on the remaining args.

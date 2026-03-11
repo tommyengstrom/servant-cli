@@ -40,6 +40,7 @@ where
 
 import Data.Bifunctor
 import qualified Data.ByteString.Builder as BSB
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.CaseInsensitive as CI
 import Data.Char
@@ -160,6 +161,18 @@ instance
     either
       (cliHandler pm (Proxy @a) pc hA)
       (cliHandler pm (Proxy @b) pc hB)
+
+-- | 'NamedRoutes' delegates to the flattened 'ToServantApi' representation.
+instance
+  ( HasCLI m (ToServantApi api) ctx
+  ) =>
+  HasCLI m (NamedRoutes api) ctx
+  where
+  type CLIResult m (NamedRoutes api) = CLIResult m (ToServantApi api)
+  type CLIHandler m (NamedRoutes api) r = CLIHandler m (ToServantApi api) r
+
+  cliPStructWithContext_ pm _ = cliPStructWithContext_ pm (Proxy @(ToServantApi api))
+  cliHandler pm _ = cliHandler pm (Proxy @(ToServantApi api))
 
 -- | A path component is interpreted as a "subcommand".
 instance (KnownSymbol path, HasCLI m api ctx) => HasCLI m (path :> api) ctx where
@@ -693,21 +706,13 @@ instance
 
   cliHandler pm _ = cliHandler pm (Proxy @api)
 
-newtype instance ContextFor m (BasicAuth realm usr) = GenBasicAuthData
-  { genBasicAuthData :: m BasicAuthData
-  }
-
--- | Add 'GenBasicAuthData' to the required context, meaning it must be
--- provided to allow the client to generate authentication data.  The
--- action will only be run if the user selects this endpoint via command
--- line arguments.
+-- | BasicAuth credentials are provided via @--basic-user@ and @--basic-pass@
+-- command line options.  No context is required.
 --
 -- Please use a secure connection!
 instance
   ( ToAuthInfo (BasicAuth realm usr),
-    HasCLI m api ctx,
-    BasicAuth realm usr ∈ ctx,
-    Monad m
+    HasCLI m api ctx
   ) =>
   HasCLI m (BasicAuth realm usr :> api) ctx
   where
@@ -716,11 +721,16 @@ instance
 
   cliPStructWithContext_ pm _ p =
     note [infonote, reqnote] $
-      withParamM (basicAuthReq <$> genBasicAuthData md)
-        <$> cliPStructWithContext_ pm (Proxy @api) p
+      passOpt ?:> userOpt ?:>
+        fmap (\f user pass -> f . basicAuthReq (BasicAuthData user pass))
+          (cliPStructWithContext_ pm (Proxy @api) p)
     where
-      md :: ContextFor m (BasicAuth realm usr)
-      md = rget p
+      userOpt = Opt { optName = "basic-user", optDesc = "Username for basic auth"
+                    , optMeta = "USER", optVals = Nothing
+                    , optRead = orRequired (BS8.pack <$> str), optKind = OptOther }
+      passOpt = Opt { optName = "basic-pass", optDesc = "Password for basic auth"
+                    , optMeta = "PASS", optVals = Nothing
+                    , optRead = orRequired (BS8.pack <$> str), optKind = OptOther }
       infonote = "Authentication required: " ++ _authIntro
       reqnote = "Required information: " ++ _authDataRequired
 

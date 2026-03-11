@@ -11,12 +11,11 @@
 import           Control.Concurrent
 import           Control.Exception (bracket)
 import           Control.Monad.Error.Class (throwError)
-import           Control.Monad.IO.Class
 import           Data.Aeson
 import           Data.Maybe
 import           Data.Proxy
 import           Data.Text                (Text)
-import           Data.Vinyl               (Rec(RNil, (:&)))
+import           Data.Vinyl               (Rec(RNil))
 import           GHC.Generics
 import           Network.HTTP.Client      (newManager, defaultManagerSettings)
 import           Network.HTTP.Types.Status (statusCode, statusMessage)
@@ -67,52 +66,54 @@ instance ToAuthInfo (BasicAuth "login" Int) where
       DocAuthentication "Login credientials"
                         "Username and password"
 
-type TestApi =
-        Summary "Send a greeting"
-           :> "hello"
-           :> Capture "name" Text
-           :> QueryParam "capital" Bool
-           :> Get '[JSON] Greet
-   :<|> Summary "Greet utilities"
-           :> "greet"
-           :> ReqBody '[JSON] Greet
-           :> ( Get  '[JSON] Int
-           :<|> BasicAuth "login" Int
-             :> Post '[JSON] NoContent
-              )
-   :<|> Summary "List users"
-           :> "auth"
-           :> "listUsers"
-           :> Header "authorization" Text
-           :> Get '[JSON] [Text]
-   :<|> Summary "Deep paths test"
-           :> "dig"
-           :> "down"
-           :> "deep"
-           :> Summary "Almost there"
-           :> Capture "name" Text
-           :> "more"
-           :> Summary "We made it"
-           :> Get '[JSON] Text
+data Routes mode = Routes
+  { hello     :: mode :- Summary "Send a greeting"
+                      :> "hello"
+                      :> Capture "name" Text
+                      :> QueryParam "capital" Bool
+                      :> Get '[JSON] Greet
+  , greetLen  :: mode :- Summary "Greet utilities"
+                      :> "greet"
+                      :> ReqBody '[JSON] Greet
+                      :> Get '[JSON] Int
+  , greetPost :: mode :- Summary "Greet utilities"
+                      :> "greet"
+                      :> ReqBody '[JSON] Greet
+                      :> BasicAuth "login" Int
+                      :> Post '[JSON] NoContent
+  , listUsers :: mode :- Summary "List users"
+                      :> "auth"
+                      :> "listUsers"
+                      :> Header' '[Required] "authorization" Text
+                      :> Get '[JSON] [Text]
+  , deepPath  :: mode :- Summary "Deep paths test"
+                      :> "dig"
+                      :> "down"
+                      :> "deep"
+                      :> Summary "Almost there"
+                      :> Capture "name" Text
+                      :> "more"
+                      :> Summary "We made it"
+                      :> Get '[JSON] Text
+  } deriving Generic
 
+type TestApi = NamedRoutes Routes
 
 testApi :: Proxy TestApi
 testApi = Proxy
 
 server :: Application
-server = serveWithContext testApi (authCheck :. EmptyContext) $
-        (\t b -> pure . Greet $ "Hello, "
-              <> if fromMaybe False b
-                    then T.toUpper t
-                    else t
-        )
-   :<|> (\(Greet g) -> pure (T.length g)
-                  :<|> (\_ -> pure NoContent)
-        )
-   :<|> (\case Just "hunter2" -> pure ["john", "hunter"]
-               _              -> throwError err401
-        )
-   :<|> (pure . T.reverse)
+server = serveWithContext testApi (authCheck :. EmptyContext) Routes
+    { hello = \t b -> pure . Greet $ "Hello, "
+            <> if fromMaybe False b
+                  then T.toUpper t
+                  else t
+    , greetLen = \(Greet g) -> pure (T.length g)
+    , greetPost = \(Greet _) _ -> pure NoContent
+    , listUsers = \case "hunter2" -> pure ["john", "hunter"]
+                        _         -> throwError err401
+    , deepPath = pure . T.reverse
+    }
   where
     -- | Map of valid users and passwords
     userMap = M.fromList [("alice", "password"), ("bob", "hunter2")]
@@ -135,7 +136,7 @@ main = do
     c <- parseClientPrettyFlatWithContext
                     testApi
                     (Proxy :: Proxy ClientM)
-                    (getPwd :& RNil)
+                    RNil
                     cinfo
 
     withServer $ do
@@ -161,12 +162,3 @@ main = do
           Right bs -> BSL.putStrLn bs
   where
     cinfo = header "greet" <> progDesc "Greet API"
-    getPwd :: ContextFor ClientM (BasicAuth "login" Int)
-    getPwd = GenBasicAuthData . liftIO $ do
-      putStrLn "Authentication needed for this action!"
-      putStrLn "(Hint: try 'bob' and 'hunter2')"
-      putStrLn "Enter username:"
-      n <- BS.getLine
-      putStrLn "Enter password:"
-      p <- BS.getLine
-      pure $ BasicAuthData n p
